@@ -29,6 +29,8 @@ import plotly.express as px
 import streamlit as st
 
 import cdms_engine as eng
+import history_store as hs
+import pdf_report as pdfrep
 
 st.set_page_config(page_title="CDMS Promo Claim Accuracy Dashboard", layout="wide")
 st.title("CDMS Promo Claim Accuracy Dashboard")
@@ -36,8 +38,13 @@ st.title("CDMS Promo Claim Accuracy Dashboard")
 if "working_summary" not in st.session_state:
     st.session_state.working_summary = None
     st.session_state.working_detail = None
+    st.session_state.working_run_id = None
 
-tab1, tab2 = st.tabs(["Stage 1 — Build the Working", "Stage 2 — Validate CDMS Promo Claim"])
+tab1, tab2, tab3 = st.tabs([
+    "Stage 1 — Build the Working",
+    "Stage 2 — Validate CDMS Promo Claim",
+    "History",
+])
 
 # ======================================================================
 # STAGE 1
@@ -130,6 +137,26 @@ with tab1:
                 st.session_state.working_summary = summary
                 st.session_state.working_detail = working
 
+                st.subheader("Save this run")
+                sc1, sc2 = st.columns([3, 1])
+                with sc1:
+                    stage1_label = st.text_input(
+                        "Label for this Working (e.g. 'June 2026')", value="", key="stage1_label"
+                    )
+                with sc2:
+                    st.write("")
+                    st.write("")
+                    if st.button("💾 Save to History", key="save_stage1"):
+                        if not stage1_label.strip():
+                            st.error("Give this run a label first (e.g. the month).")
+                        else:
+                            run_id = hs.save_working_run(
+                                summary, label=stage1_label.strip(),
+                                source_file=sec_sales_file.name,
+                            )
+                            st.session_state.working_run_id = run_id
+                            st.success(f"Saved as '{stage1_label.strip()}'. See it under the History tab.")
+
                 st.subheader("Overview")
                 k1, k2, k3 = st.columns(3)
                 k1.metric("Distributors", f"{summary.shape[0]:,}")
@@ -179,12 +206,28 @@ with tab1:
                     return buf.getvalue()
 
                 wb_bytes = build_stage1_workbook(summary, depot, working)
-                st.download_button(
-                    "Download Working workbook (.xlsx)",
-                    data=wb_bytes,
-                    file_name="CDMS_Working.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+
+                @st.cache_data
+                def build_stage1_pdf(summary_df, depot_df):
+                    return pdfrep.build_working_pdf(summary_df, depot_df)
+
+                pdf_bytes = build_stage1_pdf(summary, depot)
+
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    st.download_button(
+                        "Download Working workbook (.xlsx)",
+                        data=wb_bytes,
+                        file_name="CDMS_Working.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                with dl2:
+                    st.download_button(
+                        "Download Working report (.pdf, with pie chart)",
+                        data=pdf_bytes,
+                        file_name="CDMS_Working.pdf",
+                        mime="application/pdf",
+                    )
 
 # ======================================================================
 # STAGE 2
@@ -285,6 +328,26 @@ with tab2:
                 )
                 score = eng.claim_accuracy_scorecard(comparison)
 
+                st.subheader("Save this run")
+                sc1, sc2 = st.columns([3, 1])
+                with sc1:
+                    stage2_label = st.text_input(
+                        "Label for this comparison (e.g. 'June 2026 vs Portal')", value="", key="stage2_label"
+                    )
+                with sc2:
+                    st.write("")
+                    st.write("")
+                    if st.button("💾 Save to History", key="save_stage2"):
+                        if not stage2_label.strip():
+                            st.error("Give this run a label first.")
+                        else:
+                            hs.save_claim_run(
+                                comparison, score, label=stage2_label.strip(),
+                                working_run_id=st.session_state.working_run_id,
+                                claim_file=claim_file.name,
+                            )
+                            st.success(f"Saved as '{stage2_label.strip()}'. See it under the History tab.")
+
                 st.subheader("Accuracy Overview")
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Accuracy", f"{score['Accuracy %']}%")
@@ -326,9 +389,96 @@ with tab2:
                     return buf.getvalue()
 
                 wb2_bytes = build_stage2_workbook(comparison, score)
-                st.download_button(
-                    "Download claim accuracy report (.xlsx)",
-                    data=wb2_bytes,
-                    file_name="CDMS_Promo_Claim_Accuracy.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+
+                @st.cache_data
+                def build_stage2_pdf(comparison_df, score_dict):
+                    return pdfrep.build_claim_accuracy_pdf(comparison_df, score_dict)
+
+                pdf2_bytes = build_stage2_pdf(comparison, score)
+
+                dl3, dl4 = st.columns(2)
+                with dl3:
+                    st.download_button(
+                        "Download claim accuracy report (.xlsx)",
+                        data=wb2_bytes,
+                        file_name="CDMS_Promo_Claim_Accuracy.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                with dl4:
+                    st.download_button(
+                        "Download claim accuracy report (.pdf, with pie chart)",
+                        data=pdf2_bytes,
+                        file_name="CDMS_Promo_Claim_Accuracy.pdf",
+                        mime="application/pdf",
+                    )
+
+# ======================================================================
+# HISTORY
+# ======================================================================
+with tab3:
+    st.header("History")
+    st.caption(
+        "Past saved runs. Note: on the free tier this survives normal day-to-day "
+        "use, but is not guaranteed to survive every app redeploy or a very long "
+        "period of inactivity — treat it as a convenience, not a permanent archive. "
+        "Download the Excel reports for anything you must keep long-term."
+    )
+
+    st.subheader("Saved Working runs (Stage 1)")
+    working_runs = hs.list_working_runs()
+    if working_runs.empty:
+        st.info("No Working runs saved yet. Save one from the Stage 1 tab.")
+    else:
+        st.dataframe(working_runs, use_container_width=True, hide_index=True)
+        wr1, wr2, wr3 = st.columns(3)
+        with wr1:
+            view_id = st.selectbox(
+                "View a saved Working", working_runs["id"], key="hist_view_working",
+                format_func=lambda i: working_runs.loc[working_runs["id"] == i, "label"].values[0],
+            )
+            if st.button("Load into Stage 2", key="load_working_to_stage2"):
+                st.session_state.working_summary = hs.load_working_run(view_id)
+                st.session_state.working_run_id = view_id
+                st.success("Loaded — go to Stage 2 to validate a claim against this Working.")
+        with wr2:
+            del_id = st.selectbox(
+                "Delete a saved Working", working_runs["id"], key="hist_del_working",
+                format_func=lambda i: working_runs.loc[working_runs["id"] == i, "label"].values[0],
+            )
+            if st.button("🗑️ Delete", key="delete_working_run"):
+                hs.delete_working_run(del_id)
+                st.success("Deleted. Refresh to update the list.")
+                st.rerun()
+        with wr3:
+            st.write("")
+
+        with st.expander("Preview a saved Working"):
+            preview_df = hs.load_working_run(view_id)
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Saved Claim comparisons (Stage 2)")
+    claim_runs = hs.list_claim_runs()
+    if claim_runs.empty:
+        st.info("No claim comparisons saved yet. Save one from the Stage 2 tab.")
+    else:
+        st.dataframe(claim_runs, use_container_width=True, hide_index=True)
+        cr1, cr2 = st.columns(2)
+        with cr1:
+            cview_id = st.selectbox(
+                "View a saved comparison", claim_runs["id"], key="hist_view_claim",
+                format_func=lambda i: claim_runs.loc[claim_runs["id"] == i, "label"].values[0],
+            )
+        with cr2:
+            cdel_id = st.selectbox(
+                "Delete a saved comparison", claim_runs["id"], key="hist_del_claim",
+                format_func=lambda i: claim_runs.loc[claim_runs["id"] == i, "label"].values[0],
+            )
+            if st.button("🗑️ Delete", key="delete_claim_run"):
+                hs.delete_claim_run(cdel_id)
+                st.success("Deleted. Refresh to update the list.")
+                st.rerun()
+
+        with st.expander("Preview a saved comparison"):
+            preview_cmp = hs.load_claim_run(cview_id)
+            st.dataframe(preview_cmp, use_container_width=True, hide_index=True)
+
